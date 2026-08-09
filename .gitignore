@@ -1,0 +1,16 @@
+# Virtual Environment
+venv/
+*.pyc
+__pycache__/
+
+# Datasets & Models
+data/
+weights/
+*.pth
+*.pt
+*.h5
+
+# Editor / OS Files
+.DS_Store
+.vscode/
+.idea/
