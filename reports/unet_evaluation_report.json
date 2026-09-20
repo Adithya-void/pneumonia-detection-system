@@ -1,0 +1,32 @@
+{
+    "model_architecture": "Biomedical U-Net (Single-Channel)",
+    "num_test_samples": 32,
+    "metrics_summary": {
+        "dice_similarity_coefficient": {
+            "mean": 0.8984331616855283,
+            "std": 0.02980913989070293
+        },
+        "intersection_over_union": {
+            "mean": 0.8169291270642708,
+            "std": 0.04930097780192139
+        },
+        "precision_ppv": {
+            "mean": 1.0,
+            "std": 0.0
+        },
+        "sensitivity_recall_tpr": {
+            "mean": 0.8169291270642708,
+            "std": 0.04930097780192139
+        },
+        "specificity_tnr": {
+            "mean": 1.0,
+            "std": 0.0
+        }
+    },
+    "aggregate_confusion_matrix": {
+        "true_positives": 311454,
+        "false_positives": 0,
+        "true_negatives": 1725492,
+        "false_negatives": 60206
+    }
+}
