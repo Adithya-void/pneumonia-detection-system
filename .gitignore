@@ -3,14 +3,8 @@ venv/
 *.pyc
 __pycache__/
 
-# Datasets & Models
+# Datasets & Temporary Scratch Files
 data/
-weights/
-*.pth
-*.pt
-*.h5
-
-# Editor / OS Files
-.DS_Store
-.vscode/
-.idea/
+scratch/
+.tmp/
+*.log
