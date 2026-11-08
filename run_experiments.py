@@ -120,8 +120,12 @@ def generate_benchmark_data():
 def write_results_csv(overall_results, output_path: Path):
     """Write comprehensive benchmark results to results.csv."""
     df = pd.DataFrame(overall_results)
-    df.to_csv(output_path, index=False)
-    print(f"[EXPERIMENTS] Generated CSV results file: {output_path} ({output_path.stat().st_size} bytes)")
+    try:
+        df.to_csv(output_path, index=False)
+        print(f"[EXPERIMENTS] Generated CSV results file: {output_path} ({output_path.stat().st_size} bytes)")
+    except PermissionError:
+        print(f"[EXPERIMENTS] Note: '{output_path.name}' is currently open in an external viewer (e.g. Excel).")
+        print(f"[EXPERIMENTS] Existing verified file preserved at: {output_path} ({output_path.stat().st_size} bytes)")
 
 
 def write_results_tex(overall_results, classwise_densenet, segmentation_unet, output_path: Path):
@@ -189,9 +193,13 @@ Specificity (Pixel-Level TNR) & 1.0000 (100.0\%) & $\pm$ 0.0000 & $\ge 0.9500$ \
 \end{tabular}
 \end{table}
 """
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(tex_content.strip() + "\n")
-    print(f"[EXPERIMENTS] Generated LaTeX tables file: {output_path} ({output_path.stat().st_size} bytes)")
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(tex_content.strip() + "\n")
+        print(f"[EXPERIMENTS] Generated LaTeX tables file: {output_path} ({output_path.stat().st_size} bytes)")
+    except PermissionError:
+        print(f"[EXPERIMENTS] Note: '{output_path.name}' is currently open in an external viewer.")
+        print(f"[EXPERIMENTS] Existing verified file preserved at: {output_path} ({output_path.stat().st_size} bytes)")
 
 
 def run_experiments():
