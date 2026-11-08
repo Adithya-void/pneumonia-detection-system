@@ -1,0 +1,6 @@
+Model,Task,Input_Resolution,Overall_Accuracy,Macro_F1,Weighted_F1,Normal_Precision,Bacterial_Recall,Viral_Recall,Pneumonia_Sensitivity,Dice_DSC,IoU_Jaccard
+Biomedical U-Net,Lung Parenchyma Segmentation,256x256,N/A (Dice 89.84%),N/A,N/A,1.0000,N/A,N/A,N/A,0.8984,0.8169
+ResNet-50 (Baseline),3-Class Diagnosis,224x224,71.47%,0.6892,0.6975,0.9120,0.9215,0.4865,96.41%,N/A,N/A
+2-Stage Cascade (Initial),Hierarchical Cascade,384x384,65.06%,0.5969,0.6295,0.9412,0.9711,0.2905,97.44%,N/A,N/A
+2-Stage Cascade (Tuned),Hierarchical Cascade,384x384,72.92%,0.7051,0.7252,0.9452,0.9463,0.5946,98.72%,N/A,N/A
+Single-Stage DenseNet-121 (Flagship),3-Class Diagnosis + Grad-CAM,384x384,75.96%,0.7464,0.7289,0.9816,0.9463,0.5946,99.23%,N/A,N/A

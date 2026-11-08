@@ -679,4 +679,287 @@ axes[1, 1].text(0.05, 0.95, summary_text, transform=axes[1, 1].transAxes, fontsi
 plt.tight_layout()
 plt.savefig('pneumonia_densenet121_evaluation_dashboard.png', dpi=300, bbox_inches='tight')
 plt.show()
-print("[+] Evaluation Dashboard generated & saved as 'pneumonia_densenet121_evaluation_dashboard.png'!")
+print("[+] Evaluation Dashboard successfully saved to Colab as 'pneumonia_densenet121_evaluation_dashboard.png'!")
+
+# %% [CELL 10] Complete End-to-End Diagnostic Pipeline (CLAHE -> U-Net ROI -> DenseNet-121 -> Grad-CAM)
+print("\n=== COMPLETE END-TO-END PNEUMONIA DIAGNOSTIC PIPELINE ===")
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+# Interactive Google Colab file upload widget
+try:
+    from google.colab import files
+    print("Please click 'Choose Files' to upload a Raw Chest Radiograph (JPEG/PNG)...")
+    uploaded = files.upload()
+    uploaded_path = list(uploaded.keys())[0]
+except ImportError:
+    uploaded_path = "data/processed/segmented_images/train/Normal/IM-0115-0001.jpeg"
+
+print(f"\n[+] Raw Image Uploaded: {uploaded_path}")
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# -----------------------------------------------------------------------------
+# STEP 1: CLAHE CONTRAST ENHANCEMENT
+# -----------------------------------------------------------------------------
+def apply_clahe_enhancement(img_gray: np.ndarray, clip_limit: float = 2.0, tile_grid_size: Tuple[int, int] = (8, 8)) -> np.ndarray:
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    return clahe.apply(img_gray)
+
+# -----------------------------------------------------------------------------
+# STEP 2: ANATOMICAL LUNG ROI EXTRACTION (U-NET MODEL / ADAPTIVE FALLBACK)
+# -----------------------------------------------------------------------------
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+    def forward(self, x):
+        return self.conv(x)
+
+class UNet(nn.Module):
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, features: List[int] = [64, 128, 256, 512]):
+        super().__init__()
+        self.downs = nn.ModuleList()
+        self.ups = nn.ModuleList()
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        for feature in features:
+            self.downs.append(DoubleConv(in_channels, feature))
+            in_channels = feature
+
+        self.bottleneck = DoubleConv(features[-1], features[-1] * 2)
+
+        for feature in reversed(features):
+            self.ups.append(nn.ConvTranspose2d(feature * 2, feature, kernel_size=2, stride=2))
+            self.ups.append(DoubleConv(feature * 2, feature))
+
+        self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
+
+    def forward(self, x):
+        skip_connections = []
+        for down in self.downs:
+            x = down(x)
+            skip_connections.append(x)
+            x = self.pool(x)
+
+        x = self.bottleneck(x)
+        skip_connections = skip_connections[::-1]
+
+        for idx in range(0, len(self.ups), 2):
+            x = self.ups[idx](x)
+            skip_connection = skip_connections[idx // 2]
+            if x.shape != skip_connection.shape:
+                x = F.interpolate(x, size=skip_connection.shape[2:], mode="bilinear", align_corners=True)
+            concat_x = torch.cat((skip_connection, x), dim=1)
+            x = self.ups[idx + 1](concat_x)
+
+        return self.final_conv(x)
+
+# Load U-Net Model Checkpoint if available
+unet_candidate_weights = [
+    WEIGHTS_SAVE_DIR / 'lung_unet_segmentation.pth',
+    Path('/content/drive/MyDrive/pneumonia_detection/weights/lung_unet_segmentation.pth'),
+    Path('/content/lung_unet_segmentation.pth'),
+    Path('weights/lung_unet_segmentation.pth'),
+    Path('lung_unet_segmentation.pth'),
+]
+
+unet_weights_path = None
+for p in unet_candidate_weights:
+    if p.exists():
+        unet_weights_path = p
+        break
+
+unet_model = None
+if unet_weights_path:
+    try:
+        print(f"[+] Loading U-Net Segmentation Weights from: {unet_weights_path}")
+        unet_model = UNet(in_channels=1, out_channels=1).to(device)
+        checkpoint_u = safe_torch_load(unet_weights_path, map_location=device)
+        unet_model.load_state_dict(checkpoint_u['model_state_dict'] if 'model_state_dict' in checkpoint_u else checkpoint_u)
+        unet_model.eval()
+    except Exception as e:
+        print(f"[WARNING] U-Net load failed ({e}). Using adaptive contour segmentation fallback.")
+        unet_model = None
+
+def extract_lung_roi(img_gray: np.ndarray, unet_model: Optional[nn.Module] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate anatomical lung mask using U-Net Neural Network (or adaptive threshold fallback)."""
+    h_orig, w_orig = img_gray.shape[:2]
+    
+    if unet_model is not None:
+        # Preprocess for U-Net (256x256 tensor)
+        img_resized_unet = cv2.resize(img_gray, (256, 256), interpolation=cv2.INTER_AREA)
+        tensor_u = torch.from_numpy(img_resized_unet).float().unsqueeze(0).unsqueeze(0).to(device) / 255.0
+        
+        with torch.no_grad():
+            pred_logits = unet_model(tensor_u)
+            pred_mask = (torch.sigmoid(pred_logits) > 0.5).float().cpu().numpy()[0, 0]
+        
+        mask = (cv2.resize(pred_mask, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST) * 255).astype(np.uint8)
+    else:
+        # Adaptive Threshold Fallback
+        blurred = cv2.GaussianBlur(img_gray, (5, 5), 0)
+        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        border_mask = np.zeros((h_orig + 2, w_orig + 2), np.uint8)
+        cv2.floodFill(thresh, border_mask, (0, 0), 0)
+        cv2.floodFill(thresh, border_mask, (w_orig - 1, 0), 0)
+
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_close)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        mask = np.zeros_like(img_gray, dtype=np.uint8)
+
+        if contours:
+            sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)[:2]
+            cv2.drawContours(mask, sorted_contours, -1, 255, thickness=cv2.FILLED)
+        else:
+            cv2.ellipse(mask, (w_orig // 2, h_orig // 2), (w_orig // 3, h_orig // 3), 0, 0, 360, 255, -1)
+
+    # Non-zero safety guard: If U-Net or contour mask is empty/black, fallback to CLAHE radiograph directly
+    if mask is None or np.sum(mask) < (0.01 * mask.size * 255):
+        mask = np.ones_like(img_gray, dtype=np.uint8) * 255
+        segmented_roi = img_gray
+    else:
+        segmented_roi = cv2.bitwise_and(img_gray, img_gray, mask=mask)
+
+    return segmented_roi, mask
+
+# Read raw image
+img_raw = cv2.imread(uploaded_path, cv2.IMREAD_GRAYSCALE)
+if img_raw is None:
+    raise ValueError(f"Could not read image file at: {uploaded_path}")
+
+# Execute Step 1 & 2 (CLAHE + U-Net Lung Segmentation)
+img_clahe = apply_clahe_enhancement(img_raw)
+img_roi, lung_mask = extract_lung_roi(img_clahe, unet_model=unet_model)
+
+IMAGE_SIZE = (384, 384)
+img_roi_resized = cv2.resize(img_roi, IMAGE_SIZE, interpolation=cv2.INTER_CUBIC)
+img_raw_resized = cv2.resize(img_raw, IMAGE_SIZE, interpolation=cv2.INTER_CUBIC)
+
+# Prepare 3-channel normalized tensor for DenseNet-121
+img_3ch = np.stack([img_roi_resized] * 3, axis=-1)
+img_tensor = torch.from_numpy(img_3ch).float().permute(2, 0, 1) / 255.0
+mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+input_tensor = ((img_tensor - mean) / std).unsqueeze(0).to(device)
+
+# -----------------------------------------------------------------------------
+# STEP 3: DENSENET-121 CLASSIFIER INFERENCE
+# -----------------------------------------------------------------------------
+def safe_torch_load(path, map_location=None):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+def clear_all_model_hooks(model: nn.Module):
+    for m in model.modules():
+        m._forward_hooks.clear()
+        m._backward_hooks.clear()
+        m._forward_pre_hooks.clear()
+
+WEIGHTS_SAVE_DIR = Path('/content/drive/MyDrive/pneumonia_detection/weights')
+candidate_weights = [
+    WEIGHTS_SAVE_DIR / 'best_densenet121_pneumonia_classifier.pth',
+    Path('/content/best_densenet121_pneumonia_classifier.pth'),
+    Path('best_densenet121_pneumonia_classifier.pth'),
+]
+
+weights_path = None
+for p in candidate_weights:
+    if p.exists():
+        weights_path = p
+        break
+
+if weights_path is None:
+    weights_path = WEIGHTS_SAVE_DIR / 'best_densenet121_pneumonia_classifier.pth'
+
+model = DenseNet121PneumoniaClassifier(num_classes=3, pretrained=False).to(device)
+checkpoint = safe_torch_load(weights_path, map_location=device)
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
+clear_all_model_hooks(model)
+
+CLASS_NAMES = ["Normal", "Bacterial Pneumonia", "Viral Pneumonia"]
+
+with torch.no_grad():
+    outputs = model(input_tensor)
+    probabilities = F.softmax(outputs, dim=1).cpu().numpy()[0]
+    predicted_class_id = int(np.argmax(probabilities))
+    confidence_pct = probabilities[predicted_class_id] * 100
+
+print("\n" + "=" * 65)
+print("             END-TO-END DIAGNOSTIC INFERENCE REPORT             ")
+print("=" * 65)
+print(f" Primary Predicted Class : {CLASS_NAMES[predicted_class_id].upper()}")
+print(f" Confidence Score        : {confidence_pct:.2f}%\n")
+print(" Full Class Probability Breakdown:")
+for idx, name in enumerate(CLASS_NAMES):
+    pct = probabilities[idx] * 100
+    bar = "█" * int(pct // 5)
+    print(f"   • {name:<20}: {pct:6.2f}%  [{bar:<20}]")
+print("=" * 65)
+
+# -----------------------------------------------------------------------------
+# STEP 4: GRAD-CAM EXPLAINABILITY MAP GENERATION
+# -----------------------------------------------------------------------------
+target_layer = model.backbone.features[-1]
+grad_cam = GradCAM(model, target_layer)
+
+heatmap = grad_cam.generate_heatmap(input_tensor, target_class=predicted_class_id)
+overlay = grad_cam.overlay_heatmap(img_roi_resized, heatmap)
+
+# -----------------------------------------------------------------------------
+# STEP 5: RENDER COMPLETE 4-PANEL DIAGNOSTIC DASHBOARD
+# -----------------------------------------------------------------------------
+fig, axes = plt.subplots(1, 4, figsize=(22, 5.5), dpi=300)
+
+# Panel 1: Raw Input
+axes[0].imshow(img_raw_resized, cmap='gray')
+axes[0].set_title("1) Raw Input Radiograph", fontsize=11, fontweight='bold')
+axes[0].axis('off')
+
+# Panel 2: CLAHE + Lung ROI
+axes[1].imshow(img_roi_resized, cmap='gray')
+axes[1].set_title("2) CLAHE + Lung ROI Extraction", fontsize=11, fontweight='bold')
+axes[1].axis('off')
+
+# Panel 3: Grad-CAM Overlay
+axes[2].imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+axes[2].set_title("3) Grad-CAM Saliency Overlay\n(DenseNet-121 Attention)", fontsize=11, fontweight='bold')
+axes[2].axis('off')
+
+# Panel 4: Class Probabilities Bar Chart
+y_pos = np.arange(len(CLASS_NAMES))
+colors = ['#2ecc71' if i == 0 else ('#e74c3c' if i == 1 else '#9b59b6') for i in range(len(CLASS_NAMES))]
+
+bars = axes[3].barh(y_pos, probabilities * 100, color=colors, height=0.55)
+axes[3].set_yticks(y_pos)
+axes[3].set_yticklabels(CLASS_NAMES, fontsize=10, fontweight='semibold')
+axes[3].set_xlim(0, 105)
+axes[3].set_xlabel("Confidence Probability (%)", fontsize=10, fontweight='semibold')
+axes[3].set_title(f"4) Diagnostic Class Probabilities\nPrimary: {CLASS_NAMES[predicted_class_id]} ({confidence_pct:.1f}%)", fontsize=11, fontweight='bold')
+
+for bar in bars:
+    width = bar.get_width()
+    axes[3].annotate(f'{width:.1f}%',
+                     xy=(width + 1.5, bar.get_y() + bar.get_height() / 2),
+                     ha='left', va='center', fontsize=9, fontweight='bold')
+
+plt.tight_layout()
+plt.show()
